@@ -82,18 +82,25 @@ rustup default stable
 
 ## Install the MCP Server
 
-Clone the repository and build the Rust binary:
+Recommended install from GitHub:
+
+```bash
+cargo install --git ssh://git@github.com/formonkey/brain-memory-mcp.git --bin brain-memory-mcp-rs
+```
+
+This installs the executable into Cargo's bin directory:
+
+- macOS/Linux: `~/.cargo/bin/brain-memory-mcp-rs`
+- Windows: `%USERPROFILE%\.cargo\bin\brain-memory-mcp-rs.exe`
+
+Make sure Cargo's bin directory is in your `PATH`.
+
+For local development, clone and build manually:
 
 ```bash
 git clone git@github.com:formonkey/brain-memory-mcp.git
 cd brain-memory-mcp
 cargo build --release --bin brain-memory-mcp-rs
-```
-
-The binary is created at:
-
-```bash
-./target/release/brain-memory-mcp-rs
 ```
 
 The first indexing run may download the configured embedding model.
@@ -145,37 +152,37 @@ Searches are filtered by context first, so results from different projects do no
 Index a folder:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project index /path/to/docs
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project index /path/to/docs
 ```
 
 Search:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project search "how is auth configured?"
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project search "how is auth configured?"
 ```
 
 Rebuild a folder index:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project reset /path/to/docs
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project reset /path/to/docs
 ```
 
 Show stats:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project stats
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project stats
 ```
 
 Show stats for all contexts:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" stats --all-contexts
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" stats --all-contexts
 ```
 
 Run as an MCP server over stdio:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project serve
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project serve
 ```
 
 During development you can also run:
@@ -276,7 +283,7 @@ Example for an MCP client:
 {
   "mcpServers": {
     "brain-memory": {
-      "command": "/absolute/path/to/brain-memory-mcp/target/release/brain-memory-mcp-rs",
+      "command": "brain-memory-mcp-rs",
       "args": [
         "--db",
         "/Users/me/.codex/brain-memory/brain.sqlite3",
@@ -294,13 +301,19 @@ Example for an MCP client:
 
 ## Configure in Codex
 
-In Codex, local MCP servers are declared in `~/.codex/config.toml`. Use absolute paths in this file; TOML strings do not expand `$HOME`.
+In Codex, local MCP servers are declared in `~/.codex/config.toml`.
 
-Add an entry like this, replacing `/absolute/path/to/brain-memory-mcp` and `/Users/me` with your real paths:
+First install the MCP from GitHub:
+
+```bash
+cargo install --git ssh://git@github.com/formonkey/brain-memory-mcp.git --bin brain-memory-mcp-rs
+```
+
+Then add an entry like this, replacing `/Users/me` and `/path/to/markdown` with your real paths:
 
 ```toml
 [mcp_servers.brain-memory]
-command = "/absolute/path/to/brain-memory-mcp/target/release/brain-memory-mcp-rs"
+command = "brain-memory-mcp-rs"
 args = [
   "--db",
   "/Users/me/.codex/brain-memory/brain.sqlite3",
@@ -314,11 +327,29 @@ BRAIN_MEMORY_CONTEXT = "my-project"
 BRAIN_MEMORY_MODEL = "intfloat/multilingual-e5-small"
 ```
 
-On Windows, use absolute Windows paths and escape backslashes when using regular TOML strings:
+If `brain-memory-mcp-rs` is not in Codex's `PATH`, use the full Cargo bin path instead:
 
 ```toml
 [mcp_servers.brain-memory]
-command = "C:\\Users\\me\\dev\\brain-memory-mcp\\target\\release\\brain-memory-mcp-rs.exe"
+command = "/Users/me/.cargo/bin/brain-memory-mcp-rs"
+args = [
+  "--db",
+  "/Users/me/.codex/brain-memory/brain.sqlite3",
+  "serve",
+]
+startup_timeout_sec = 120
+
+[mcp_servers.brain-memory.env]
+BRAIN_MEMORY_DOCS = "/path/to/markdown"
+BRAIN_MEMORY_CONTEXT = "my-project"
+BRAIN_MEMORY_MODEL = "intfloat/multilingual-e5-small"
+```
+
+On Windows:
+
+```toml
+[mcp_servers.brain-memory]
+command = "C:\\Users\\me\\.cargo\\bin\\brain-memory-mcp-rs.exe"
 args = [
   "--db",
   "C:\\Users\\me\\.codex\\brain-memory\\brain.sqlite3",
@@ -337,7 +368,7 @@ After editing `~/.codex/config.toml`, restart Codex so it loads the new MCP serv
 Before connecting it to Codex, verify that the binary works:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project stats
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project stats
 ```
 
 ## Create an Agent That Uses the Memory
