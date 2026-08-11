@@ -9,18 +9,20 @@ use std::env;
 use std::path::PathBuf;
 
 use super::embedder::FastEmbedder;
-use super::store::VectorStore;
+use super::store::{normalize_context, VectorStore};
 
 #[derive(Clone)]
 pub struct BrainMemoryServer {
     db_path: PathBuf,
+    default_context: String,
     tool_router: ToolRouter<Self>,
 }
 
 impl BrainMemoryServer {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db_path: PathBuf, default_context: String) -> Self {
         Self {
             db_path,
+            default_context: normalize_context(&default_context),
             tool_router: Self::tool_router(),
         }
     }
@@ -36,6 +38,7 @@ impl BrainMemoryServer {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IndexParams {
     folder: Option<String>,
+    context: Option<String>,
     #[serde(default = "default_pattern")]
     pattern: String,
     #[serde(default = "default_chunk_size")]
@@ -49,6 +52,7 @@ pub struct IndexParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ResetParams {
     folder: Option<String>,
+    context: Option<String>,
     #[serde(default = "default_pattern")]
     pattern: String,
     #[serde(default = "default_chunk_size")]
@@ -62,6 +66,7 @@ pub struct ResetParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
     query: String,
+    context: Option<String>,
     #[serde(default = "default_top_k")]
     top_k: usize,
     root: Option<String>,
@@ -74,18 +79,30 @@ pub struct ChunkParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClearParams {
+    context: Option<String>,
+    #[serde(default)]
+    all_contexts: bool,
     #[serde(default)]
     confirm: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StatsParams {
+    context: Option<String>,
+    #[serde(default)]
+    all_contexts: bool,
+}
+
 #[tool_router]
 impl BrainMemoryServer {
-    #[tool(description = "Index Markdown files from a folder into the local vector database.")]
+    #[tool(description = "Index Markdown files from a folder into a named local memory context.")]
     fn index_markdown_folder(&self, Parameters(params): Parameters<IndexParams>) -> String {
         json_result(|| {
             let folder = target_folder(params.folder)?;
+            let context = self.resolve_context(params.context);
             let mut store = self.open_store()?;
             let summary = store.index_folder(
+                &context,
                 &PathBuf::from(folder),
                 &params.pattern,
                 params.chunk_size,
@@ -96,7 +113,9 @@ impl BrainMemoryServer {
         })
     }
 
-    #[tool(description = "Delete and rebuild the vector index for a Markdown folder.")]
+    #[tool(
+        description = "Delete and rebuild the vector index for a Markdown folder in one context."
+    )]
     fn reset_index(&self, Parameters(params): Parameters<ResetParams>) -> String {
         json_result(|| {
             if !params.confirm {
@@ -106,8 +125,10 @@ impl BrainMemoryServer {
                 }));
             }
             let folder = target_folder(params.folder)?;
+            let context = self.resolve_context(params.context);
             let mut store = self.open_store()?;
             let summary = store.reset_folder(
+                &context,
                 &PathBuf::from(folder),
                 &params.pattern,
                 params.chunk_size,
@@ -117,12 +138,13 @@ impl BrainMemoryServer {
         })
     }
 
-    #[tool(description = "Search indexed Markdown memory for the chunks most relevant to a query.")]
+    #[tool(description = "Search indexed Markdown memory within a named context.")]
     fn search_memory(&self, Parameters(params): Parameters<SearchParams>) -> String {
         json_result(|| {
             let mut store = self.open_store()?;
             let root = params.root.as_deref().map(PathBuf::from);
-            let results = store.search(&params.query, params.top_k, root.as_deref())?;
+            let context = self.resolve_context(params.context);
+            let results = store.search(&params.query, params.top_k, &context, root.as_deref())?;
             Ok(serde_json::json!(results))
         })
     }
@@ -139,14 +161,21 @@ impl BrainMemoryServer {
     }
 
     #[tool(description = "Return database and indexing statistics.")]
-    fn memory_stats(&self) -> String {
+    fn memory_stats(&self, Parameters(params): Parameters<StatsParams>) -> String {
         json_result(|| {
             let store = self.open_store()?;
-            store.stats()
+            if params.all_contexts {
+                store.stats(None)
+            } else {
+                let context = self.resolve_context(params.context);
+                store.stats(Some(&context))
+            }
         })
     }
 
-    #[tool(description = "Clear the local memory index. Pass confirm=true to actually delete it.")]
+    #[tool(
+        description = "Clear one local memory context, or all contexts with all_contexts=true. Pass confirm=true to actually delete."
+    )]
     fn clear_memory(&self, Parameters(params): Parameters<ClearParams>) -> String {
         json_result(|| {
             if !params.confirm {
@@ -156,9 +185,23 @@ impl BrainMemoryServer {
                 }));
             }
             let store = self.open_store()?;
-            store.clear()?;
-            Ok(serde_json::json!({ "cleared": true }))
+            if params.all_contexts {
+                store.clear_all()?;
+                Ok(serde_json::json!({ "cleared": true, "scope": "all_contexts" }))
+            } else {
+                let context = self.resolve_context(params.context);
+                store.clear_context(&context)?;
+                Ok(serde_json::json!({ "cleared": true, "context": context }))
+            }
         })
+    }
+}
+
+impl BrainMemoryServer {
+    fn resolve_context(&self, context: Option<String>) -> String {
+        context
+            .map(|value| normalize_context(&value))
+            .unwrap_or_else(|| self.default_context.clone())
     }
 }
 
@@ -167,7 +210,7 @@ impl ServerHandler for BrainMemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Local vector memory for Markdown documentation. Use search_memory before answering questions about indexed project notes, architecture docs, decisions, runbooks, or codebase knowledge."
+                "Local vector memory for Markdown documentation. Memories are separated by context. Use search_memory with the relevant context before answering questions about indexed project notes, architecture docs, decisions, runbooks, or codebase knowledge."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

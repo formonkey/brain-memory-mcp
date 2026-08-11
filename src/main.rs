@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::rust::embedder::FastEmbedder;
 use crate::rust::mcp_server::BrainMemoryServer;
-use crate::rust::store::VectorStore;
+use crate::rust::store::{VectorStore, DEFAULT_CONTEXT};
 
 #[derive(Debug, Parser)]
 #[command(name = "brain-memory-mcp-rs")]
@@ -20,6 +20,9 @@ struct Cli {
         default_value = ".brain-memory/brain_memory.sqlite3"
     )]
     db: PathBuf,
+
+    #[arg(long, env = "BRAIN_MEMORY_CONTEXT", default_value = DEFAULT_CONTEXT)]
+    context: String,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -55,7 +58,10 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    Stats,
+    Stats {
+        #[arg(long)]
+        all_contexts: bool,
+    },
 }
 
 #[tokio::main]
@@ -64,7 +70,9 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
-            let service = BrainMemoryServer::new(cli.db).serve(stdio()).await?;
+            let service = BrainMemoryServer::new(cli.db, cli.context)
+                .serve(stdio())
+                .await?;
             service.waiting().await?;
         }
         Command::Index {
@@ -75,7 +83,8 @@ async fn main() -> Result<()> {
             force,
         } => {
             let mut store = VectorStore::open(cli.db, Box::new(FastEmbedder::new()?))?;
-            let summary = store.index_folder(&folder, &pattern, chunk_size, overlap, force)?;
+            let summary =
+                store.index_folder(&cli.context, &folder, &pattern, chunk_size, overlap, force)?;
             println!("{}", to_string_pretty(&summary)?);
         }
         Command::Reset {
@@ -85,7 +94,8 @@ async fn main() -> Result<()> {
             overlap,
         } => {
             let mut store = VectorStore::open(cli.db, Box::new(FastEmbedder::new()?))?;
-            let summary = store.reset_folder(&folder, &pattern, chunk_size, overlap)?;
+            let summary =
+                store.reset_folder(&cli.context, &folder, &pattern, chunk_size, overlap)?;
             println!(
                 "{}",
                 to_string_pretty(&serde_json::json!({ "reset": true, "summary": summary }))?
@@ -93,12 +103,17 @@ async fn main() -> Result<()> {
         }
         Command::Search { query, top_k, root } => {
             let mut store = VectorStore::open(cli.db, Box::new(FastEmbedder::new()?))?;
-            let results = store.search(&query, top_k, root.as_deref())?;
+            let results = store.search(&query, top_k, &cli.context, root.as_deref())?;
             println!("{}", to_string_pretty(&results)?);
         }
-        Command::Stats => {
+        Command::Stats { all_contexts } => {
             let store = VectorStore::open(cli.db, Box::new(FastEmbedder::new()?))?;
-            println!("{}", to_string_pretty(&store.stats()?)?);
+            let context = if all_contexts {
+                None
+            } else {
+                Some(cli.context.as_str())
+            };
+            println!("{}", to_string_pretty(&store.stats(context)?)?);
         }
     }
 

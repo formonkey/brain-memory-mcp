@@ -12,11 +12,13 @@ use walkdir::WalkDir;
 use super::chunking::{chunk_markdown, TextChunk};
 use super::embedder::{Embedder, EmbeddingInput};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+pub const DEFAULT_CONTEXT: &str = "default";
 static REGISTER_SQLITE_VEC: Once = Once::new();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IndexSummary {
+    pub context: String,
     pub root: String,
     pub files_seen: usize,
     pub files_indexed: usize,
@@ -28,6 +30,8 @@ pub struct IndexSummary {
 pub struct SearchResult {
     pub chunk_id: i64,
     pub score: f64,
+    pub context: String,
+    pub root: String,
     pub path: String,
     pub title: Option<String>,
     pub chunk_index: i64,
@@ -68,11 +72,13 @@ impl VectorStore {
             );
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path TEXT NOT NULL UNIQUE,
+                context TEXT NOT NULL,
+                path TEXT NOT NULL,
                 root TEXT NOT NULL,
                 mtime_ns INTEGER NOT NULL,
                 size_bytes INTEGER NOT NULL,
-                title TEXT
+                title TEXT,
+                UNIQUE(context, path)
             );
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,9 +90,12 @@ impl VectorStore {
                 UNIQUE(document_id, chunk_index)
             );
             CREATE INDEX IF NOT EXISTS idx_documents_root ON documents(root);
+            CREATE INDEX IF NOT EXISTS idx_documents_context_root ON documents(context, root);
             CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
             "#,
         )?;
+        self.migrate_context_schema_if_needed()?;
+        self.migrate_vector_context_schema_if_needed()?;
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
             params!["schema_version", SCHEMA_VERSION.to_string()],
@@ -107,12 +116,14 @@ impl VectorStore {
 
     pub fn index_folder(
         &mut self,
+        context: &str,
         root: &Path,
         pattern: &str,
         chunk_size: usize,
         overlap: usize,
         force: bool,
     ) -> Result<IndexSummary> {
+        let context = normalize_context(context);
         let root = canonical_dir(root)?;
         let files = markdown_files(&root, pattern)?;
         let mut files_indexed = 0usize;
@@ -128,7 +139,7 @@ impl VectorStore {
             let size_bytes = metadata.len() as i64;
             let resolved = path.canonicalize()?.to_string_lossy().to_string();
 
-            if !force && self.is_current(&resolved, mtime_ns, size_bytes)? {
+            if !force && self.is_current(&context, &resolved, mtime_ns, size_bytes)? {
                 files_skipped += 1;
                 continue;
             }
@@ -138,6 +149,7 @@ impl VectorStore {
             let chunks = chunk_markdown(&text, chunk_size, overlap)?;
             let title = extract_title(&text, path);
             self.replace_document(
+                &context,
                 &resolved,
                 &root.to_string_lossy(),
                 mtime_ns,
@@ -150,6 +162,7 @@ impl VectorStore {
         }
 
         Ok(IndexSummary {
+            context,
             root: root.to_string_lossy().to_string(),
             files_seen: files.len(),
             files_indexed,
@@ -160,28 +173,31 @@ impl VectorStore {
 
     pub fn reset_folder(
         &mut self,
+        context: &str,
         root: &Path,
         pattern: &str,
         chunk_size: usize,
         overlap: usize,
     ) -> Result<IndexSummary> {
+        let context = normalize_context(context);
         let root = canonical_dir(root)?;
-        self.delete_vectors_for_root(&root.to_string_lossy())?;
+        self.delete_vectors_for_root(&context, &root.to_string_lossy())?;
         self.conn.execute(
-            "DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE root = ?)",
-            params![root.to_string_lossy()],
+            "DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE context = ? AND root = ?)",
+            params![context, root.to_string_lossy()],
         )?;
         self.conn.execute(
-            "DELETE FROM documents WHERE root = ?",
-            params![root.to_string_lossy()],
+            "DELETE FROM documents WHERE context = ? AND root = ?",
+            params![context, root.to_string_lossy()],
         )?;
-        self.index_folder(&root, pattern, chunk_size, overlap, true)
+        self.index_folder(&context, &root, pattern, chunk_size, overlap, true)
     }
 
     pub fn search(
         &mut self,
         query: &str,
         top_k: usize,
+        context: &str,
         root: Option<&Path>,
     ) -> Result<Vec<SearchResult>> {
         if query.trim().is_empty() {
@@ -191,6 +207,7 @@ impl VectorStore {
             return Ok(Vec::new());
         }
         let top_k = top_k.clamp(1, 50);
+        let context = normalize_context(context);
         let query_vector = self
             .embedder
             .embed(&[query.to_string()], EmbeddingInput::Query)?
@@ -208,9 +225,10 @@ impl VectorStore {
                     FROM chunk_vectors
                     WHERE embedding MATCH ?
                       AND k = ?
+                      AND context = ?
                       AND root = ?
                 )
-                SELECT c.id, c.chunk_index, c.text, d.path, d.title, knn_matches.distance
+                SELECT c.id, c.chunk_index, c.text, d.context, d.root, d.path, d.title, knn_matches.distance
                 FROM knn_matches
                 JOIN chunks c ON c.id = knn_matches.chunk_id
                 JOIN documents d ON d.id = c.document_id
@@ -220,6 +238,7 @@ impl VectorStore {
             let results = collect_search(stmt.query(params![
                 query_blob,
                 top_k as i64,
+                context,
                 root.to_string_lossy()
             ])?)?;
             Ok(results)
@@ -231,15 +250,17 @@ impl VectorStore {
                     FROM chunk_vectors
                     WHERE embedding MATCH ?
                       AND k = ?
+                      AND context = ?
                 )
-                SELECT c.id, c.chunk_index, c.text, d.path, d.title, knn_matches.distance
+                SELECT c.id, c.chunk_index, c.text, d.context, d.root, d.path, d.title, knn_matches.distance
                 FROM knn_matches
                 JOIN chunks c ON c.id = knn_matches.chunk_id
                 JOIN documents d ON d.id = c.document_id
                 ORDER BY knn_matches.distance
                 "#,
             )?;
-            let results = collect_search(stmt.query(params![query_blob, top_k as i64])?)?;
+            let results =
+                collect_search(stmt.query(params![query_blob, top_k as i64, context])?)?;
             Ok(results)
         }
     }
@@ -248,7 +269,7 @@ impl VectorStore {
         self.conn
             .query_row(
                 r#"
-                SELECT c.id, c.chunk_index, c.start_char, c.end_char, c.text, d.path, d.root, d.title
+                SELECT c.id, c.chunk_index, c.start_char, c.end_char, c.text, d.context, d.path, d.root, d.title
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
                 WHERE c.id = ?
@@ -261,9 +282,10 @@ impl VectorStore {
                         "start_char": row.get::<_, i64>(2)?,
                         "end_char": row.get::<_, i64>(3)?,
                         "text": row.get::<_, String>(4)?,
-                        "path": row.get::<_, String>(5)?,
-                        "root": row.get::<_, String>(6)?,
-                        "title": row.get::<_, Option<String>>(7)?,
+                        "context": row.get::<_, String>(5)?,
+                        "path": row.get::<_, String>(6)?,
+                        "root": row.get::<_, String>(7)?,
+                        "title": row.get::<_, Option<String>>(8)?,
                     }))
                 },
             )
@@ -271,20 +293,57 @@ impl VectorStore {
             .map_err(Into::into)
     }
 
-    pub fn stats(&self) -> Result<serde_json::Value> {
-        let documents: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
-        let chunks: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
-        let mut roots_stmt = self.conn.prepare(
-            "SELECT root, COUNT(*) AS documents FROM documents GROUP BY root ORDER BY root",
-        )?;
+    pub fn stats(&self, context: Option<&str>) -> Result<serde_json::Value> {
+        let context = context.map(normalize_context);
+        let (documents, chunks) = if let Some(context) = &context {
+            let documents: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM documents WHERE context = ?",
+                params![context],
+                |row| row.get(0),
+            )?;
+            let chunks: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.context = ?",
+                params![context],
+                |row| row.get(0),
+            )?;
+            (documents, chunks)
+        } else {
+            let documents: i64 =
+                self.conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
+            let chunks: i64 = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+            (documents, chunks)
+        };
+
+        let mut roots_stmt = if context.is_some() {
+            self.conn.prepare(
+                "SELECT context, root, COUNT(*) AS documents FROM documents WHERE context = ? GROUP BY context, root ORDER BY context, root",
+            )?
+        } else {
+            self.conn.prepare(
+                "SELECT context, root, COUNT(*) AS documents FROM documents GROUP BY context, root ORDER BY context, root",
+            )?
+        };
+        let params: Vec<String> = context.iter().cloned().collect();
         let roots = roots_stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok(serde_json::json!({
+                    "context": row.get::<_, String>(0)?,
+                    "root": row.get::<_, String>(1)?,
+                    "documents": row.get::<_, i64>(2)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut contexts_stmt = self
+            .conn
+            .prepare("SELECT context, COUNT(*) AS documents FROM documents GROUP BY context ORDER BY context")?;
+        let contexts = contexts_stmt
             .query_map([], |row| {
                 Ok(serde_json::json!({
-                    "root": row.get::<_, String>(0)?,
+                    "context": row.get::<_, String>(0)?,
                     "documents": row.get::<_, i64>(1)?,
                 }))
             })?
@@ -292,16 +351,35 @@ impl VectorStore {
 
         Ok(serde_json::json!({
             "db_path": self.db_path,
+            "context": context,
             "embedding_model": self.metadata_value("embedding_model")?,
             "sqlite_vec_version": self.metadata_value("sqlite_vec_version")?,
             "vector_dimensions": self.metadata_value("vector_dimensions")?,
             "documents": documents,
             "chunks": chunks,
+            "contexts": contexts,
             "roots": roots,
         }))
     }
 
-    pub fn clear(&self) -> Result<()> {
+    pub fn clear_context(&self, context: &str) -> Result<()> {
+        let context = normalize_context(context);
+        if self.has_vec_table()? {
+            self.conn.execute(
+                "DELETE FROM chunk_vectors WHERE context = ?",
+                params![context],
+            )?;
+        }
+        self.conn.execute(
+            "DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE context = ?)",
+            params![context],
+        )?;
+        self.conn
+            .execute("DELETE FROM documents WHERE context = ?", params![context])?;
+        Ok(())
+    }
+
+    pub fn clear_all(&self) -> Result<()> {
         if self.has_vec_table()? {
             self.conn.execute("DELETE FROM chunk_vectors", [])?;
         }
@@ -310,12 +388,18 @@ impl VectorStore {
         Ok(())
     }
 
-    fn is_current(&self, path: &str, mtime_ns: i64, size_bytes: i64) -> Result<bool> {
+    fn is_current(
+        &self,
+        context: &str,
+        path: &str,
+        mtime_ns: i64,
+        size_bytes: i64,
+    ) -> Result<bool> {
         let current = self
             .conn
             .query_row(
-                "SELECT 1 FROM documents WHERE path = ? AND mtime_ns = ? AND size_bytes = ?",
-                params![path, mtime_ns, size_bytes],
+                "SELECT 1 FROM documents WHERE context = ? AND path = ? AND mtime_ns = ? AND size_bytes = ?",
+                params![context, path, mtime_ns, size_bytes],
                 |_| Ok(()),
             )
             .optional()?
@@ -325,6 +409,7 @@ impl VectorStore {
 
     fn replace_document(
         &mut self,
+        context: &str,
         path: &str,
         root: &str,
         mtime_ns: i64,
@@ -335,8 +420,8 @@ impl VectorStore {
         let existing: Option<i64> = self
             .conn
             .query_row(
-                "SELECT id FROM documents WHERE path = ?",
-                params![path],
+                "SELECT id FROM documents WHERE context = ? AND path = ?",
+                params![context, path],
                 |row| row.get(0),
             )
             .optional()?;
@@ -354,8 +439,8 @@ impl VectorStore {
             document_id
         } else {
             self.conn.execute(
-                "INSERT INTO documents(path, root, mtime_ns, size_bytes, title) VALUES (?, ?, ?, ?, ?)",
-                params![path, root, mtime_ns, size_bytes, title],
+                "INSERT INTO documents(context, path, root, mtime_ns, size_bytes, title) VALUES (?, ?, ?, ?, ?, ?)",
+                params![context, path, root, mtime_ns, size_bytes, title],
             )?;
             self.conn.last_insert_rowid()
         };
@@ -373,8 +458,8 @@ impl VectorStore {
                 )?;
                 let chunk_id = self.conn.last_insert_rowid();
                 self.conn.execute(
-                    "INSERT INTO chunk_vectors(rowid, embedding, root) VALUES (?, ?, ?)",
-                    params![chunk_id, vector_blob(vector), root],
+                    "INSERT INTO chunk_vectors(rowid, embedding, context, root) VALUES (?, ?, ?, ?)",
+                    params![chunk_id, vector_blob(vector), context, root],
                 )?;
             }
         }
@@ -396,7 +481,7 @@ impl VectorStore {
 
         self.conn.execute(
             &format!(
-                "CREATE VIRTUAL TABLE chunk_vectors USING vec0(embedding float[{dimensions}] distance_metric=cosine, root TEXT)"
+                "CREATE VIRTUAL TABLE chunk_vectors USING vec0(embedding float[{dimensions}] distance_metric=cosine, context TEXT, root TEXT)"
             ),
             [],
         )?;
@@ -436,15 +521,15 @@ impl VectorStore {
         Ok(())
     }
 
-    fn delete_vectors_for_root(&self, root: &str) -> Result<()> {
+    fn delete_vectors_for_root(&self, context: &str, root: &str) -> Result<()> {
         if !self.has_vec_table()? {
             return Ok(());
         }
         let mut stmt = self.conn.prepare(
-            "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.root = ?",
+            "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.context = ? AND d.root = ?",
         )?;
         let ids = stmt
-            .query_map(params![root], |row| row.get::<_, i64>(0))?
+            .query_map(params![context, root], |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         for id in ids {
             self.conn
@@ -463,6 +548,66 @@ impl VectorStore {
             .optional()
             .map_err(Into::into)
     }
+
+    fn migrate_context_schema_if_needed(&self) -> Result<()> {
+        if self.table_has_column("documents", "context")? {
+            return Ok(());
+        }
+
+        if self.has_vec_table()? {
+            self.conn.execute("DROP TABLE chunk_vectors", [])?;
+        }
+        self.conn.execute("DROP TABLE IF EXISTS chunks", [])?;
+        self.conn.execute("DROP TABLE IF EXISTS documents", [])?;
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                context TEXT NOT NULL,
+                path TEXT NOT NULL,
+                root TEXT NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                title TEXT,
+                UNIQUE(context, path)
+            );
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_index INTEGER NOT NULL,
+                start_char INTEGER NOT NULL,
+                end_char INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                UNIQUE(document_id, chunk_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_documents_root ON documents(root);
+            CREATE INDEX IF NOT EXISTS idx_documents_context_root ON documents(context, root);
+            CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn migrate_vector_context_schema_if_needed(&self) -> Result<()> {
+        if !self.has_vec_table()? || self.table_has_column("chunk_vectors", "context")? {
+            return Ok(());
+        }
+
+        self.conn.execute("DROP TABLE chunk_vectors", [])?;
+        self.conn.execute("DELETE FROM chunks", [])?;
+        self.conn.execute("DELETE FROM documents", [])?;
+        self.conn
+            .execute("DELETE FROM metadata WHERE key = 'vector_dimensions'", [])?;
+        Ok(())
+    }
+
+    fn table_has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(columns.iter().any(|name| name == column))
+    }
 }
 
 fn register_sqlite_vec() {
@@ -474,13 +619,15 @@ fn register_sqlite_vec() {
 fn collect_search(mut rows: rusqlite::Rows<'_>) -> Result<Vec<SearchResult>> {
     let mut results = Vec::new();
     while let Some(row) = rows.next()? {
-        let distance: f64 = row.get(5)?;
+        let distance: f64 = row.get(7)?;
         results.push(SearchResult {
             chunk_id: row.get(0)?,
             chunk_index: row.get(1)?,
             text: row.get(2)?,
-            path: row.get(3)?,
-            title: row.get(4)?,
+            context: row.get(3)?,
+            root: row.get(4)?,
+            path: row.get(5)?,
+            title: row.get(6)?,
             score: (1.0 - distance).round_to(6),
         });
     }
@@ -539,6 +686,15 @@ fn extract_title(text: &str, path: &Path) -> Option<String> {
         })
 }
 
+pub fn normalize_context(context: &str) -> String {
+    let normalized = context.trim();
+    if normalized.is_empty() {
+        DEFAULT_CONTEXT.to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,13 +723,58 @@ mod tests {
         )
         .unwrap();
         let summary = store
-            .index_folder(&docs, "**/*.md", 220, 20, false)
+            .index_folder(DEFAULT_CONTEXT, &docs, "**/*.md", 220, 20, false)
             .unwrap();
-        let results = store.search("login session token", 1, None).unwrap();
+        let results = store
+            .search("login session token", 1, DEFAULT_CONTEXT, None)
+            .unwrap();
 
         assert_eq!(summary.files_seen, 2);
+        assert_eq!(summary.context, DEFAULT_CONTEXT);
         assert_eq!(summary.files_indexed, 2);
         assert_eq!(summary.chunks_indexed, 2);
         assert!(results[0].path.ends_with("auth.md"));
+    }
+
+    #[test]
+    fn separates_search_results_by_context() {
+        let tmp = tempdir().unwrap();
+        let alpha = tmp.path().join("alpha");
+        let beta = tmp.path().join("beta");
+        fs::create_dir(&alpha).unwrap();
+        fs::create_dir(&beta).unwrap();
+        fs::write(
+            alpha.join("notes.md"),
+            "# Alpha\n\nOAuth callback handling.",
+        )
+        .unwrap();
+        fs::write(beta.join("notes.md"), "# Beta\n\nInvoice payment retries.").unwrap();
+
+        let mut store = VectorStore::open(
+            tmp.path().join("brain.sqlite3"),
+            Box::new(HashEmbedder::new(64)),
+        )
+        .unwrap();
+        store
+            .index_folder("alpha-project", &alpha, "**/*.md", 220, 20, false)
+            .unwrap();
+        store
+            .index_folder("beta-project", &beta, "**/*.md", 220, 20, false)
+            .unwrap();
+
+        let alpha_results = store
+            .search("oauth callback", 10, "alpha-project", None)
+            .unwrap();
+        let beta_results = store
+            .search("oauth callback", 10, "beta-project", None)
+            .unwrap();
+
+        assert!(!alpha_results.is_empty());
+        assert!(alpha_results
+            .iter()
+            .all(|result| result.context == "alpha-project"));
+        assert!(beta_results
+            .iter()
+            .all(|result| result.context == "beta-project"));
     }
 }

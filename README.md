@@ -104,6 +104,7 @@ Environment variables:
 
 - `BRAIN_MEMORY_DB`: SQLite database path. Defaults to `.brain-memory/brain_memory.sqlite3`.
 - `BRAIN_MEMORY_DOCS`: default folder for `index_markdown_folder` and `reset_index`.
+- `BRAIN_MEMORY_CONTEXT`: default logical memory context. Defaults to `default`.
 - `BRAIN_MEMORY_MODEL`: embedding model. Rust defaults to `intfloat/multilingual-e5-small`.
 
 Recommended database locations:
@@ -116,44 +117,71 @@ Example:
 ```bash
 export BRAIN_MEMORY_DOCS="/Users/me/dev-notes"
 export BRAIN_MEMORY_DB="$HOME/.codex/brain-memory/brain.sqlite3"
+export BRAIN_MEMORY_CONTEXT="my-project"
 ```
+
+## Contexts
+
+A single SQLite database can contain multiple isolated memory contexts.
+
+Use contexts to separate projects, clients, teams, or knowledge domains while keeping one database under `~/.codex/brain-memory`.
+
+Examples:
+
+- `brain-memory-mcp`
+- `jira-issue-context-mcp`
+- `client-acme`
+- `personal-notes`
+
+Every indexed document belongs to one `context` and one physical `root`.
+
+- `context`: logical namespace, usually a project or knowledge domain.
+- `root`: actual folder path that was indexed.
+
+Searches are filtered by context first, so results from different projects do not mix unless you explicitly ask for global stats.
 
 ## CLI Usage
 
 Index a folder:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" index /path/to/docs
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project index /path/to/docs
 ```
 
 Search:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" search "how is auth configured?"
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project search "how is auth configured?"
 ```
 
 Rebuild a folder index:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" reset /path/to/docs
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project reset /path/to/docs
 ```
 
 Show stats:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" stats
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project stats
+```
+
+Show stats for all contexts:
+
+```bash
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" stats --all-contexts
 ```
 
 Run as an MCP server over stdio:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" serve
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project serve
 ```
 
 During development you can also run:
 
 ```bash
-cargo run --bin brain-memory-mcp-rs -- --db .brain-memory/brain.sqlite3 serve
+cargo run --bin brain-memory-mcp-rs -- --db .brain-memory/brain.sqlite3 --context my-project serve
 ```
 
 ## MCP Tools
@@ -165,6 +193,7 @@ Indexes a folder of `*.md` files.
 Parameters:
 
 - `folder`: folder to index. Optional when `BRAIN_MEMORY_DOCS` is set.
+- `context`: logical namespace. Optional when `BRAIN_MEMORY_CONTEXT` is set.
 - `pattern`: file pattern. Defaults to `**/*.md`.
 - `chunk_size`: chunk size. Defaults to `1200`.
 - `overlap`: overlap between chunks. Defaults to `180`.
@@ -179,6 +208,7 @@ Deletes and rebuilds the index for one folder.
 Parameters:
 
 - `folder`: folder to rebuild. Optional when `BRAIN_MEMORY_DOCS` is set.
+- `context`: logical namespace. Optional when `BRAIN_MEMORY_CONTEXT` is set.
 - `pattern`: file pattern. Defaults to `**/*.md`.
 - `chunk_size`: chunk size. Defaults to `1200`.
 - `overlap`: overlap between chunks. Defaults to `180`.
@@ -193,6 +223,7 @@ Searches relevant chunks by semantic similarity.
 Parameters:
 
 - `query`: question or search text.
+- `context`: logical namespace. Optional when `BRAIN_MEMORY_CONTEXT` is set.
 - `top_k`: number of results. Defaults to `8`.
 - `root`: limit the search to one indexed folder.
 
@@ -208,23 +239,34 @@ Expected use: expand a specific result returned by `search_memory`.
 
 Returns database statistics:
 
+Parameters:
+
+- `context`: logical namespace to inspect. Optional when `BRAIN_MEMORY_CONTEXT` is set.
+- `all_contexts`: show all contexts when `true`.
+
+Returned fields include:
+
 - SQLite path
+- selected context
 - embedding model
 - `sqlite-vec` version
 - vector dimensions
+- known contexts
 - document count
 - chunk count
 - indexed roots
 
 ### `clear_memory`
 
-Deletes all local memory.
+Deletes memory for one context by default.
 
 Parameters:
 
+- `context`: logical namespace to clear. Optional when `BRAIN_MEMORY_CONTEXT` is set.
+- `all_contexts`: clear every context when `true`.
 - `confirm`: must be `true`.
 
-Expected use: full database reset, not just one folder.
+Expected use: context reset by default. Use `all_contexts=true` only for a full database reset.
 
 ## MCP Client Config
 
@@ -242,6 +284,7 @@ Example for an MCP client:
       ],
       "env": {
         "BRAIN_MEMORY_DOCS": "/path/to/markdown",
+        "BRAIN_MEMORY_CONTEXT": "my-project",
         "BRAIN_MEMORY_MODEL": "intfloat/multilingual-e5-small"
       }
     }
@@ -267,6 +310,7 @@ startup_timeout_sec = 120
 
 [mcp_servers.brain-memory.env]
 BRAIN_MEMORY_DOCS = "/path/to/markdown"
+BRAIN_MEMORY_CONTEXT = "my-project"
 BRAIN_MEMORY_MODEL = "intfloat/multilingual-e5-small"
 ```
 
@@ -284,6 +328,7 @@ startup_timeout_sec = 120
 
 [mcp_servers.brain-memory.env]
 BRAIN_MEMORY_DOCS = "C:\\Users\\me\\dev-notes"
+BRAIN_MEMORY_CONTEXT = "my-project"
 BRAIN_MEMORY_MODEL = "intfloat/multilingual-e5-small"
 ```
 
@@ -292,7 +337,7 @@ After editing `~/.codex/config.toml`, restart Codex so it loads the new MCP serv
 Before connecting it to Codex, verify that the binary works:
 
 ```bash
-./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" stats
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project stats
 ```
 
 ## Create an Agent That Uses the Memory
@@ -310,9 +355,11 @@ Recommended example:
 
 This project uses the `brain-memory` MCP server to retrieve context from vectorized Markdown documentation.
 
+Default memory context: `my-project`.
+
 Before answering questions about architecture, technical decisions, runbooks, known issues, configuration, project flows, or historical knowledge:
 
-1. Use `search_memory` with a short semantic query.
+1. Use `search_memory` with a short semantic query and the project context.
 2. If the result seems incomplete, rephrase the query and search again.
 3. If a specific result needs more context, use `get_chunk` with its `chunk_id`.
 4. When useful, mention the document paths used in the answer.
@@ -350,9 +397,11 @@ description: Use when answering questions that may depend on local Markdown memo
 
 Use the `brain-memory` MCP server to retrieve relevant local Markdown context before answering questions about project knowledge.
 
+Use the configured `BRAIN_MEMORY_CONTEXT` by default. If the user names a project/client/domain, pass that value as `context`.
+
 ## Workflow
 
-1. For project knowledge questions, call `search_memory` first.
+1. For project knowledge questions, call `search_memory` first with the relevant `context`.
 2. Prefer concise semantic queries over long prompts.
 3. If results are weak, try 1-2 alternative queries.
 4. Use `get_chunk` when a returned `chunk_id` needs more exact context.
@@ -398,9 +447,10 @@ Codex answers using the relevant Markdown chunks
 
 1. Put your notes or documentation in a Markdown folder.
 2. Set `BRAIN_MEMORY_DOCS` to that folder.
-3. Run `index_markdown_folder` or the CLI `index` command.
-4. Let the agent use `search_memory` before answering questions about that knowledge.
-5. Use `reset_index` when files were deleted or when you want a clean rebuild.
+3. Set `BRAIN_MEMORY_CONTEXT` to the project or domain name.
+4. Run `index_markdown_folder` or the CLI `index` command.
+5. Let the agent use `search_memory` before answering questions about that knowledge.
+6. Use `reset_index` when files were deleted or when you want a clean rebuild.
 
 ## Performance
 
