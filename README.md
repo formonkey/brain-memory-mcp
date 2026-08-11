@@ -185,11 +185,68 @@ Run as an MCP server over stdio:
 brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project serve
 ```
 
+Run diagnostics:
+
+```bash
+brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" --context my-project doctor
+```
+
+`doctor` validates that the binary can:
+
+- open and write to SQLite
+- load `sqlite-vec`
+- load the embedding model
+- index a temporary Markdown document
+- run semantic search
+- clean up its temporary diagnostic context
+
 During development you can also run:
 
 ```bash
 cargo run --bin brain-memory-mcp-rs -- --db .brain-memory/brain.sqlite3 --context my-project serve
 ```
+
+## Windows Corporate Environments
+
+This project does not require downloading a prebuilt `.exe` release. The recommended Windows flow is source-based:
+
+```powershell
+choco install rustup.install -y
+rustup default stable-msvc
+cargo install --git ssh://git@github.com/formonkey/brain-memory-mcp.git --bin brain-memory-mcp-rs
+```
+
+Then validate the installation:
+
+```powershell
+C:\Users\me\.cargo\bin\brain-memory-mcp-rs.exe --db C:\Users\me\.codex\brain-memory\brain.sqlite3 --context my-project doctor
+```
+
+For Codex, prefer the explicit Cargo bin path if the desktop app does not inherit your shell `PATH`:
+
+```toml
+[mcp_servers.brain-memory]
+command = "C:\\Users\\me\\.cargo\\bin\\brain-memory-mcp-rs.exe"
+args = [
+  "--db",
+  "C:\\Users\\me\\.codex\\brain-memory\\brain.sqlite3",
+  "serve",
+]
+startup_timeout_sec = 120
+
+[mcp_servers.brain-memory.env]
+BRAIN_MEMORY_DOCS = "C:\\Users\\me\\dev-notes"
+BRAIN_MEMORY_CONTEXT = "my-project"
+BRAIN_MEMORY_MODEL = "intfloat/multilingual-e5-small"
+```
+
+Common corporate blockers:
+
+- SSH access to GitHub may be blocked. Use the HTTPS Git URL if needed:
+  `cargo install --git https://github.com/formonkey/brain-memory-mcp.git --bin brain-memory-mcp-rs`.
+- The first model download may be blocked by proxy or firewall rules.
+- Antivirus tools may slow down the first build because `fastembed-rs` and ONNX dependencies compile native code.
+- If Codex cannot start the MCP, use the full path to the binary instead of relying on `PATH`.
 
 ## MCP Tools
 
@@ -503,6 +560,8 @@ cargo fmt --check
 cargo test
 cargo build --release --bin brain-memory-mcp-rs
 ```
+
+CI runs these checks on `ubuntu-latest`, `macos-latest`, and `windows-latest`.
 
 ## References
 
