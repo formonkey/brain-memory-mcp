@@ -1,0 +1,6 @@
+.brain-memory/
+.tmp-cli/
+.fastembed_cache/
+target/
+*.sqlite3
+*.sqlite3-*
