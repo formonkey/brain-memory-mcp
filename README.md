@@ -123,31 +123,31 @@ export BRAIN_MEMORY_DB="$HOME/.codex/brain-memory/brain.sqlite3"
 Index a folder:
 
 ```bash
-target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" index /path/to/docs
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" index /path/to/docs
 ```
 
 Search:
 
 ```bash
-target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" search "how is auth configured?"
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" search "how is auth configured?"
 ```
 
 Rebuild a folder index:
 
 ```bash
-target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" reset /path/to/docs
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" reset /path/to/docs
 ```
 
 Show stats:
 
 ```bash
-target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" stats
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" stats
 ```
 
 Run as an MCP server over stdio:
 
 ```bash
-target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" serve
+./target/release/brain-memory-mcp-rs --db "$HOME/.codex/brain-memory/brain.sqlite3" serve
 ```
 
 During development you can also run:
@@ -251,7 +251,9 @@ Example for an MCP client:
 
 ## Configure in Codex
 
-In Codex, local MCP servers are declared in `~/.codex/config.toml`. Add an entry like this:
+In Codex, local MCP servers are declared in `~/.codex/config.toml`. Use absolute paths in this file; TOML strings do not expand `$HOME`.
+
+Add an entry like this, replacing `/absolute/path/to/brain-memory-mcp` and `/Users/me` with your real paths:
 
 ```toml
 [mcp_servers.brain-memory]
